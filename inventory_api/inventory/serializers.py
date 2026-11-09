@@ -44,6 +44,8 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = ("id", "sku", "name", "description", "base_price", "min_stock_level", "total_stock", "total_value")
 
 class StockTransactionSerializer(serializers.ModelSerializer):
+    quantity = serializers.IntegerField(min_value=1, max_value=2147483647)
+
     class Meta:
         model = StockTransaction
         fields = ("id", "product", "transaction_type", "quantity", "source_warehouse", "destination_warehouse", "occurred_at")

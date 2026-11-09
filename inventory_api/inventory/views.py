@@ -89,6 +89,9 @@ class TransactionViewSet(viewsets.ModelViewSet):
         if kind == "IN" and source: raise serializers.ValidationError({"source_warehouse": "Not used for IN."})
         if kind == "TRANSFER" and (not destination or destination == source): raise serializers.ValidationError({"destination_warehouse": "A different destination is required."})
         with transaction.atomic():
+            product = Product.objects.select_for_update().get(pk=product.pk)
+            if product.deleted_at is not None:
+                raise serializers.ValidationError({"product": "This product has been deleted."})
             if source:
                 current = Product.objects.filter(pk=product.pk).annotate(stock=stock_expression(source.pk)).values_list("stock", flat=True).get()
                 if current < qty: raise serializers.ValidationError({"quantity": f"Insufficient stock ({current} available)."})
