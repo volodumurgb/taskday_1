@@ -1,14 +1,16 @@
 import time
 
 import pandas as pd
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import login, logout
 from django.contrib.auth.forms import PasswordResetForm
 from django.core.cache import cache
 from django.core.mail import mail_admins
 from django.db import transaction
-from django.db.models import F
+from django.db.models import Q
+from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.utils import timezone
+from django_filters import rest_framework as filters
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -58,7 +60,10 @@ class WarehouseViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         company_id = instance.company_id
-        instance.delete()
+        try:
+            instance.delete()
+        except ProtectedError as exc:
+            raise serializers.ValidationError("This warehouse has stock movements.") from exc
         transaction.on_commit(lambda: invalidate_report(company_id))
 
 class ProductViewSet(viewsets.ModelViewSet):
@@ -68,21 +73,37 @@ class ProductViewSet(viewsets.ModelViewSet):
     ordering = ("id",)
     def get_queryset(self): return products_with_stock(company_queryset(self.request.user, Product).filter(deleted_at__isnull=True))
     def perform_create(self, serializer): serializer.save(company=self.request.user.company)
-    def perform_destroy(self, instance): instance.deleted_at = timezone.now(); instance.save(update_fields=["deleted_at"])
+    def perform_update(self, serializer):
+        product = serializer.save()
+        transaction.on_commit(lambda: invalidate_report(product.company_id))
+
+    def perform_destroy(self, instance):
+        instance.deleted_at = timezone.now()
+        instance.save(update_fields=["deleted_at"])
+
+
+class TransactionFilter(filters.FilterSet):
+    warehouse = filters.NumberFilter(method="filter_warehouse")
+
+    class Meta:
+        model = StockTransaction
+        fields = {"transaction_type": ["exact"], "source_warehouse": ["exact"], "destination_warehouse": ["exact"], "occurred_at": ["gte", "lte"]}
+
+    def filter_warehouse(self, queryset, name, value):
+        return queryset.filter(Q(source_warehouse_id=value) | Q(destination_warehouse_id=value))
 
 class TransactionViewSet(viewsets.ModelViewSet):
     serializer_class = StockTransactionSerializer
     http_method_names = ["get", "post", "head", "options"]
-    filterset_fields = {"transaction_type": ["exact"], "source_warehouse": ["exact"], "destination_warehouse": ["exact"], "occurred_at": ["gte", "lte"]}
+    filterset_class = TransactionFilter
     ordering_fields = ("occurred_at", "created_at")
     ordering = ("-occurred_at", "-id")
     def get_queryset(self): return company_queryset(self.request.user, StockTransaction).select_related("product", "source_warehouse", "destination_warehouse")
     def perform_create(self, serializer):
         rate_key = f"inventory:rate:{self.request.user.pk}:{int(time.time() // 60)}"
-        attempts = cache.get(rate_key, 0)
-        if attempts >= 50:
+        cache.add(rate_key, 0, timeout=65)
+        if cache.incr(rate_key) > 50:
             raise serializers.ValidationError("Transaction rate limit exceeded: maximum 50 per minute.")
-        cache.set(rate_key, attempts + 1, timeout=65)
         data = serializer.validated_data; product = data["product"]; kind = data["transaction_type"]; qty = data["quantity"]; source = data.get("source_warehouse"); destination = data.get("destination_warehouse")
         if product.company_id != self.request.user.company_id or (source and source.company_id != self.request.user.company_id) or (destination and destination.company_id != self.request.user.company_id):
             raise serializers.ValidationError("All resources must belong to your company.")
@@ -99,10 +120,12 @@ class TransactionViewSet(viewsets.ModelViewSet):
                 current = Product.objects.filter(pk=product.pk).annotate(stock=stock_expression(source.pk)).values_list("stock", flat=True).get()
                 if current < qty: raise serializers.ValidationError({"quantity": f"Insufficient stock ({current} available)."})
             saved = serializer.save(company=self.request.user.company, created_by=self.request.user)
-            invalidate_report(saved.company_id)
+            transaction.on_commit(lambda: invalidate_report(saved.company_id))
             if kind == "OUT":
                 remaining = Product.objects.filter(pk=product.pk).annotate(stock=stock_expression(source.pk)).values_list("stock", flat=True).get()
-                if remaining < product.min_stock_level: mail_admins("Low stock alert", f"{product.sku} has {remaining} left at {source.name}.", fail_silently=True)
+                if remaining < product.min_stock_level:
+                    message = f"{product.sku} has {remaining} left at {source.name}."
+                    transaction.on_commit(lambda: mail_admins("Low stock alert", message, fail_silently=True))
 
 @api_view(["GET"])
 def report_view(request):
