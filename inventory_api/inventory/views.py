@@ -1,10 +1,13 @@
 import time
+
+import pandas as pd
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.forms import PasswordResetForm
 from django.core.cache import cache
 from django.core.mail import mail_admins
 from django.db import transaction
 from django.db.models import F
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import api_view, permission_classes
@@ -12,7 +15,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from .models import Product, StockTransaction, User, Warehouse
 from .serializers import LoginSerializer, ProductSerializer, RegisterSerializer, StockTransactionSerializer, WarehouseSerializer
-from .services import invalidate_report, products_with_stock, stock_expression
+from .services import REPORT_CACHE_KEY, invalidate_report, products_with_stock, stock_expression
 
 def company_queryset(user, model):
     return model.objects.filter(company=user.company)
@@ -100,3 +103,22 @@ class TransactionViewSet(viewsets.ModelViewSet):
             if kind == "OUT":
                 remaining = Product.objects.filter(pk=product.pk).annotate(stock=stock_expression(source.pk)).values_list("stock", flat=True).get()
                 if remaining < product.min_stock_level: mail_admins("Low stock alert", f"{product.sku} has {remaining} left at {source.name}.", fail_silently=True)
+
+@api_view(["GET"])
+def report_view(request):
+    key = REPORT_CACHE_KEY.format(company_id=request.user.company_id); cached = cache.get(key)
+    if cached is not None: return Response(cached)
+    rows = []
+    for warehouse in company_queryset(request.user, Warehouse):
+        products = products_with_stock(company_queryset(request.user, Product)).annotate(warehouse_stock=stock_expression(warehouse.pk))
+        total = sum((p.warehouse_stock * p.base_price for p in products), 0)
+        rows.append({"warehouse_id": warehouse.id, "warehouse": warehouse.name, "total_value": str(total)})
+    cache.set(key, rows, timeout=300); return Response(rows)
+
+@api_view(["GET"])
+def export_view(request):
+    products = products_with_stock(company_queryset(request.user, Product)); data = [{"sku": p.sku, "name": p.name, "total_stock": p.total_stock, "total_value": str(p.total_value)} for p in products]
+    if request.query_params.get("format") == "csv":
+        response = HttpResponse(content_type="text/csv"); response["Content-Disposition"] = 'attachment; filename="stock-report.csv"'; pd.DataFrame(data, columns=["sku", "name", "total_stock", "total_value"]).to_csv(response, index=False); return response
+    return Response(data)
+
