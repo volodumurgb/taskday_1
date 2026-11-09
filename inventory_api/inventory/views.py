@@ -3,8 +3,9 @@ import time
 import pandas as pd
 from django.contrib.auth import login, logout
 from django.contrib.auth.forms import PasswordResetForm
+from django.conf import settings
 from django.core.cache import cache
-from django.core.mail import mail_admins
+from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Q
 from django.db.models.deletion import ProtectedError
@@ -121,11 +122,20 @@ class TransactionViewSet(viewsets.ModelViewSet):
                 if current < qty: raise serializers.ValidationError({"quantity": f"Insufficient stock ({current} available)."})
             saved = serializer.save(company=self.request.user.company, created_by=self.request.user)
             transaction.on_commit(lambda: invalidate_report(saved.company_id))
-            if kind == "OUT":
-                remaining = Product.objects.filter(pk=product.pk).annotate(stock=stock_expression(source.pk)).values_list("stock", flat=True).get()
+            if kind == "OUT" and source.admin_email:
+                remaining = current - qty
                 if remaining < product.min_stock_level:
-                    message = f"{product.sku} has {remaining} left at {source.name}."
-                    transaction.on_commit(lambda: mail_admins("Low stock alert", message, fail_silently=True))
+                    message = (
+                        f"{source.name}: {product.name} ({product.sku}) has {remaining} units left. "
+                        f"Minimum stock level: {product.min_stock_level}."
+                    )
+                    transaction.on_commit(lambda: send_mail(
+                        "Low stock alert",
+                        message,
+                        settings.DEFAULT_FROM_EMAIL,
+                        [source.admin_email],
+                        fail_silently=True,
+                    ))
 
 @api_view(["GET"])
 def report_view(request):

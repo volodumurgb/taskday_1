@@ -31,7 +31,7 @@ class WarehouseSerializer(serializers.ModelSerializer):
     stock = serializers.SerializerMethodField()
     class Meta:
         model = Warehouse
-        fields = ("id", "name", "address", "stock")
+        fields = ("id", "name", "address", "admin_email", "stock")
     def get_stock(self, warehouse):
         rows = Product.objects.filter(company=warehouse.company, deleted_at__isnull=True).annotate(stock=stock_expression(warehouse.id))
         return [{"product_id": row.id, "sku": row.sku, "name": row.name, "stock": row.stock, "value": str(row.stock * row.base_price)} for row in rows]

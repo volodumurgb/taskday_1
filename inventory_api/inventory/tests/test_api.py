@@ -135,3 +135,38 @@ class InventoryApiTests(APITestCase):
         response = self.client.get(f"/api/transactions/?warehouse={self.warehouse.pk}")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 2)
+
+    def test_out_below_minimum_emails_the_source_warehouse_admin(self):
+        self.warehouse.admin_email = "warehouse@example.com"
+        self.warehouse.save(update_fields=["admin_email"])
+        occurred_at = "2026-01-01T10:00:00Z"
+        StockTransaction.objects.create(
+            company=self.company,
+            product=self.product,
+            transaction_type="IN",
+            quantity=3,
+            destination_warehouse=self.warehouse,
+            occurred_at=occurred_at,
+            created_by=self.user,
+        )
+        payload = {
+            "product": self.product.pk,
+            "transaction_type": "OUT",
+            "quantity": 1,
+            "source_warehouse": self.warehouse.pk,
+            "occurred_at": occurred_at,
+        }
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post("/api/transactions/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(mail.outbox), 0)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post("/api/transactions/", payload, format="json")
+            self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.warehouse.admin_email])
+        self.assertIn(self.warehouse.name, mail.outbox[0].body)
+        self.assertIn(self.product.sku, mail.outbox[0].body)
+        self.assertIn("1 units left", mail.outbox[0].body)

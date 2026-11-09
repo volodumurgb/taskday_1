@@ -11,6 +11,7 @@ class Warehouse(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="warehouses")
     name = models.CharField(max_length=200)
     address = models.TextField()
+    admin_email = models.EmailField(blank=True)
     class Meta:
         unique_together = ("company", "name")
 
