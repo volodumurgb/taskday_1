@@ -22,3 +22,4 @@ def products_with_stock(queryset=None):
 def invalidate_report(company_id):
     cache.delete(REPORT_CACHE_KEY.format(company_id=company_id))
 
+# UwU
